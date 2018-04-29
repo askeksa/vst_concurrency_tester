@@ -1,0 +1,12 @@
+[package]
+name = "vst_concurrency_tester"
+version = "0.1.0"
+authors = ["askesc"]
+
+[dependencies]
+vst = { git = "https://github.com/rust-dsp/rust-vst" }
+winapi = { version = "0.3.4", features = ["timeapi"] }
+
+[lib]
+name = "concurrency_tester"
+crate-type = ["cdylib"]
