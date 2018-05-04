@@ -12,7 +12,7 @@ use vst::plugin::{CanDo, Category, HostCallback, Info, Plugin};
 
 use winapi::um::timeapi::{timeBeginPeriod, timeEndPeriod};
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::f32;
 use std::io::{stdout, Write};
 use std::ops::{Deref, DerefMut};
@@ -35,6 +35,7 @@ struct ConcurrencyPlugin {
 
 	current: Mutex<BTreeMap<&'static str, u8>>,
 	memory: Mutex<BTreeSet<String>>,
+	threads: Mutex<HashMap<thread::ThreadId, BTreeSet<&'static str>>>,
 
 	preset_num: AtomicUsize,
 	sample_rate: RwLock<f32>,
@@ -43,25 +44,34 @@ struct ConcurrencyPlugin {
 }
 
 impl ConcurrencyPlugin {
-	fn fun<T, F: FnOnce() -> T>(&self, name: &'static str, inner: F) -> T {
-		let set = {
-			// Insert function name into multiset of current functions.
-			let mut current_lock = self.current.lock().unwrap();
-			let current = current_lock.deref_mut();
-			*current.entry(name).or_insert(0) += 1;
-
-			// Build string of all current functions.
-			let mut set = String::new();
-			for (s, &count) in current.iter() {
-				for _ in 0..count {
-					if !set.is_empty() {
-						set += " ";
-					}
-					set += s;
-				}
+	fn up_name(&self, name: &'static str) -> Vec<&'static str> {
+		// Insert function name into multiset of current functions.
+		let mut current_lock = self.current.lock().unwrap();
+		let current = current_lock.deref_mut();
+		*current.entry(name).or_insert(0) += 1;
+		let mut list = vec![];
+		for (&s, &count) in current.iter() {
+			for _ in 0..count {
+				list.push(s);
 			}
-			set
-		};
+		}
+		list
+	}
+
+	fn down_name(&self, name: &'static str) {
+		// Remove function name from multiset of current functions.
+		*self.current.lock().unwrap().deref_mut().get_mut(name).unwrap() -= 1;
+	}
+
+	fn fun<T, F: FnOnce() -> T>(&self, name: &'static str, inner: F) -> T {
+		// Build string of all current functions.
+		let mut set = String::new();
+		for s in self.up_name(name) {
+			if !set.is_empty() {
+				set += " ";
+			}
+			set += s;
+		}
 
 		// Print this combination if it was not seen before.
 		{
@@ -74,14 +84,25 @@ impl ConcurrencyPlugin {
 			}
 		}
 
+		// Register this function for the current thread
+		{
+			let mut threads_lock = self.threads.lock().unwrap();
+			let threads = threads_lock.deref_mut();
+			let thread_id = thread::current().id();
+			let thread_names = threads.entry(thread_id).or_insert(BTreeSet::new());
+			if !thread_names.contains(name) {
+				thread_names.insert(name);
+				println!("\x1b[31m{:?}\x1b[0m: \x1b[33m{}\x1b[0m", thread::current().id(), name);
+			}
+		}
+
 		// Do the actual work of the function.
 		let result = inner();
 
 		// Spend a whole millisecond to make collisions more likely.
 		thread::sleep(Duration::from_millis(1));
 
-		// Remove function name from multiset of current functions.
-		*self.current.lock().unwrap().deref_mut().get_mut(name).unwrap() -= 1;
+		self.down_name(name);
 
 		result
 	}
@@ -108,7 +129,7 @@ impl Plugin for ConcurrencyPlugin {
 	fn new(_host: HostCallback) -> Self {
 		let mut plugin = ConcurrencyPlugin::default();
 		plugin.has_editor = true;
-		plugin.fun("new", || ());
+		plugin.up_name("(suspended)");
 		plugin
 	}
 
@@ -177,13 +198,14 @@ impl Plugin for ConcurrencyPlugin {
 	fn resume(&mut self) {
 		#[cfg(windows)] unsafe { timeBeginPeriod(1) };
 		println!("\x1b[32mResumed!\x1b[0m");
-		self.fun("resume", || ())
+		self.fun("resume", || self.down_name("(suspended)"))
 	}
 
 	fn suspend(&mut self) {
 		#[cfg(windows)] unsafe { timeEndPeriod(1) };
 		println!("\x1b[32mSuspended!\x1b[0m");
-		self.fun("suspend", || ())
+		self.fun("suspend", || self.up_name("(suspended)"));
+
 	}
 
 	fn can_do(&self, can_do: CanDo) -> Supported {
@@ -266,14 +288,11 @@ impl Plugin for ConcurrencyPlugin {
 	}
 
 	fn get_editor(&mut self) -> Option<&mut Editor> {
-		let raw_self = self as *mut Self;
-		self.fun("get_editor", || {
-			if self.has_editor {
-				Some(unsafe { raw_self.as_mut().unwrap() as &mut Editor })
-			} else {
-				None
-			}
-		})
+		if self.has_editor {
+			Some(self)
+		} else {
+			None
+		}
 	}
 
 	fn get_preset_data(&mut self) -> Vec<u8> {
