@@ -324,6 +324,14 @@ impl Plugin for ConcurrencyPlugin {
 			ChannelInfo::new("Foo".to_string(), None, true, None)
 		})
 	}
+
+	fn start_process(&self) {
+		self.fun("start_process", || ())
+	}
+
+	fn stop_process(&self) {
+		self.fun("stop_process", || ())
+	}
 }
 
 impl Editor for ConcurrencyPlugin {
