@@ -280,7 +280,9 @@ impl Plugin for ConcurrencyPlugin {
 								n.since_off = Some(-midi.delta_frames);
 							}
 						},
-						_ => {}
+						_ => {
+							println!("Midi event: {:02X} {:02X} {:02X}", midi.data[0], midi.data[1], midi.data[2]);
+						}
 					}
 				}
 			}
