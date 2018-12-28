@@ -13,7 +13,9 @@ use vst::plugin::{CanDo, Category, HostCallback, Info, Plugin};
 use winapi::um::timeapi::{timeBeginPeriod, timeEndPeriod};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::env::temp_dir;
 use std::f32;
+use std::fs::File;
 use std::io::{stdout, Write};
 use std::ops::{Deref, DerefMut};
 use std::os::raw::c_void;
@@ -41,9 +43,23 @@ struct ConcurrencyPlugin {
 	sample_rate: RwLock<f32>,
 	notes: Mutex<Vec<Note>>,
 	editor_open: AtomicBool,
+	suspended: AtomicBool,
+
+	output: Mutex<Option<File>>,
 }
 
 impl ConcurrencyPlugin {
+	fn out(&self, s: String) {
+		if let Some(file) = self.output.lock().unwrap().deref_mut() {
+			file.write(s.as_bytes()).ok();
+			file.write(&['\n' as u8]).ok();
+			file.flush().ok();
+			stdout().write(s.as_bytes()).ok();
+			stdout().write(&['\n' as u8]).ok();
+			stdout().flush().ok();
+		}
+	}
+
 	fn up_name(&self, name: &'static str) -> Vec<&'static str> {
 		// Insert function name into multiset of current functions.
 		let mut current_lock = self.current.lock().unwrap();
@@ -78,8 +94,7 @@ impl ConcurrencyPlugin {
 			let mut memory_lock = self.memory.lock().unwrap();
 			let memory = memory_lock.deref_mut();
 			if !memory.contains(&set) {
-				println!(" *** \x1b[33m{}\x1b[0m", set);
-				stdout().flush().unwrap();
+				self.out(format!(" *** \x1b[33m{}\x1b[0m", set));
 				memory.insert(set);
 			}
 		}
@@ -92,7 +107,7 @@ impl ConcurrencyPlugin {
 			let thread_names = threads.entry(thread_id).or_insert(BTreeSet::new());
 			if !thread_names.contains(name) {
 				thread_names.insert(name);
-				println!("\x1b[31m{:?}\x1b[0m: \x1b[33m{}\x1b[0m", thread::current().id(), name);
+				self.out(format!("\x1b[31m{:?}\x1b[0m: \x1b[33m{}\x1b[0m", thread::current().id(), name));
 			}
 		}
 
@@ -129,12 +144,18 @@ impl Plugin for ConcurrencyPlugin {
 	fn new(_host: HostCallback) -> Self {
 		let mut plugin = ConcurrencyPlugin::default();
 		plugin.has_editor = true;
-		plugin.up_name("(suspended)");
+		if !plugin.suspended.swap(true, Ordering::Relaxed) {
+			plugin.up_name("(suspended)");
+		}
 		plugin
 	}
 
 	fn init(&mut self) {
-		self.fun("init", || ())
+		self.fun("init", || {
+			let mut path = temp_dir();
+			path.push("vst_concurrency.txt");
+			*self.output.lock().unwrap().deref_mut() = File::create(path).ok();
+		});
 	}
 
 	fn change_preset(&mut self, preset: i32) {
@@ -197,15 +218,22 @@ impl Plugin for ConcurrencyPlugin {
 
 	fn resume(&mut self) {
 		#[cfg(windows)] unsafe { timeBeginPeriod(1) };
-		println!("\x1b[32mResumed!\x1b[0m");
-		self.fun("resume", || self.down_name("(suspended)"))
+		self.out(format!("\x1b[32mResumed!\x1b[0m"));
+		self.fun("resume", || {
+			if self.suspended.swap(false, Ordering::Relaxed) {
+				self.down_name("(suspended)");
+			}
+		})
 	}
 
 	fn suspend(&mut self) {
 		#[cfg(windows)] unsafe { timeEndPeriod(1) };
-		println!("\x1b[32mSuspended!\x1b[0m");
-		self.fun("suspend", || self.up_name("(suspended)"));
-
+		self.out(format!("\x1b[32mSuspended!\x1b[0m"));
+		self.fun("suspend", || {
+			if !self.suspended.swap(true, Ordering::Relaxed) {
+				self.up_name("(suspended)");
+			}
+		})
 	}
 
 	fn can_do(&self, can_do: CanDo) -> Supported {
@@ -281,7 +309,7 @@ impl Plugin for ConcurrencyPlugin {
 							}
 						},
 						_ => {
-							println!("Midi event: {:02X} {:02X} {:02X}", midi.data[0], midi.data[1], midi.data[2]);
+							self.out(format!("Midi event: {:02X} {:02X} {:02X}", midi.data[0], midi.data[1], midi.data[2]));
 						}
 					}
 				}
