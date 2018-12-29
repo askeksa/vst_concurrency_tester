@@ -199,7 +199,7 @@ impl Plugin for ConcurrencyPlugin {
 	}
 
 	fn can_be_automated(&self, _index: i32) -> bool {
-		self.fun("can_be_automated", || false)
+		self.fun("can_be_automated", || true)
 	}
 
 	fn string_to_parameter(&mut self, _index: i32, _text: String) -> bool {
